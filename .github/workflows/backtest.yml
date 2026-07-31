@@ -1,0 +1,30 @@
+name: LER Backtest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run LER backtest
+        run: python backtest.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ler-backtest-results
+          path: |
+            backtest_summary.txt
+            backtest_report.json
+          retention-days: 30
