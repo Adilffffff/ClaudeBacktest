@@ -547,11 +547,10 @@ def compute_stats(results):
     dr = list(daily_pnls.values())
     if len(dr) > 1:
         mean_r = sum(dr) / len(dr)
-        std_r  = math.sqrt(sum((x - mean_r)**2 for x in dr) / len(dr))
-        sharpe = (mean_r / std_d * math.sqrt(365)) if (std_r := std_r) > 0 else 0
-        sharpe = (mean_r / std_r * math.sqrt(365)) if std_r > 0 else 0
-        down_r = [x for x in dr if x < 0]
-        std_d  = math.sqrt(sum(x**2 for x in down_r) / len(down_r)) if down_r else 0
+        std_r   = math.sqrt(sum((x - mean_r)**2 for x in dr) / len(dr))
+        sharpe  = (mean_r / std_r * math.sqrt(365)) if std_r > 0 else 0
+        down_r  = [x for x in dr if x < 0]
+        std_d   = math.sqrt(sum(x**2 for x in down_r) / len(down_r)) if down_r else 0
         sortino = (mean_r / std_d * math.sqrt(365)) if std_d > 0 else 0
     else:
         sharpe = sortino = 0
