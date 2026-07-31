@@ -1,33 +1,38 @@
 """
-Liquidity Exhaustion Reversal (LER) Strategy — Backtest
-========================================================
+Liquidity Exhaustion Reversal (LER) Strategy — Backtest v2
+===========================================================
 Custom strategy: Wick exhaustion + volume dropout + RSI divergence
 on 30m entries, filtered by 4H trend direction.
+
+v2 tuning vs v1 (informed by v1 results):
+  - Wick ratio      : 2.5 → 1.8  (v1 too restrictive: 2203 signals from 3.3M bars)
+  - TP              : 2.5R → 1.8R (avg duration was 5.7h, price rarely ran 2.5R)
+  - Vol spike mult  : 2.0 → 1.7  (slightly looser, still meaningful)
+  - RSI div lookback: 3 bars → 5 bars (wider window catches more valid divergences)
+  - SL ATR buffer   : 0.1 → 0.15 (give trades more breathing room)
+  - All 100 coins kept (removing coins post-hoc = curve fitting)
 
 Rules:
   LONG entry (all must be true):
     1. 4H EMA21 slope is UP (current 4H EMA21 > prev 4H EMA21)
-    2. 30m candle has a long LOWER wick: wick_ratio >= 2.5
-       (lower_wick = open - low for bearish, or close - low for bullish
-        body = abs(close - open), wick = lower_wick / max(body, 0.0001))
-    3. 30m volume on that wick candle >= 2.0x the 20-bar rolling avg
+    2. 30m candle has a long LOWER wick: lower_wick / body >= 1.8
+    3. 30m volume on that wick candle >= 1.7x the 20-bar rolling avg
     4. Next 30m candle's volume < wick candle's volume (exhaustion confirmed)
-    5. RSI(14) on 30m makes a HIGHER reading vs 3 bars ago, while price
+    5. RSI(14) on 30m makes a HIGHER reading vs 5 bars ago, while price
        made a LOWER low (bullish divergence — local momentum shift)
     Entry: open of the candle AFTER confirmation candle closes
 
   SHORT entry (mirror):
     1. 4H EMA21 slope is DOWN
-    2. Long UPPER wick: upper_wick / body >= 2.5
-    3. Volume >= 2.0x 20-bar avg on wick candle
+    2. Long UPPER wick: upper_wick / body >= 1.8
+    3. Volume >= 1.7x 20-bar avg on wick candle
     4. Next candle volume drops
-    5. RSI makes LOWER reading vs 3 bars ago, price made HIGHER high
-       (bearish divergence)
+    5. RSI makes LOWER reading vs 5 bars ago, price made HIGHER high
 
   Exit:
-    - TP: 2.5R (2.5x the initial risk)
-    - SL: low of wick candle - 0.1xATR(14) for longs
-          high of wick candle + 0.1xATR(14) for shorts
+    - TP: 1.8R
+    - SL: low of wick candle - 0.15xATR(14) for longs
+          high of wick candle + 0.15xATR(14) for shorts
     - Max hold: 48 bars (24h on 30m)
 
 Data: data.binance.vision futures monthly archives
@@ -61,16 +66,17 @@ RISK_PCT        = 0.0075          # 0.75% per trade
 FEE_SIDE        = 0.0005          # 0.05% per side
 SLIPPAGE_SIDE   = 0.0002          # 0.02% per side
 MAX_POSITIONS   = 6
-TP_R            = 2.5
+TP_R            = 1.8
 MAX_HOLD_BARS   = 48              # 24h on 30m
 
-WICK_RATIO_MIN  = 2.5
-VOL_SPIKE_MULT  = 2.0
+WICK_RATIO_MIN  = 1.8
+VOL_SPIKE_MULT  = 1.7
 RSI_PERIOD      = 14
 EMA_PERIOD      = 21
 ATR_PERIOD      = 14
 VOL_AVG_PERIOD  = 20
-SL_ATR_BUFFER   = 0.1
+SL_ATR_BUFFER   = 0.15
+RSI_DIV_LOOKBACK = 5             # v1 used 3, widening to catch more divergences
 
 MAX_WORKERS     = 8               # parallel coin downloaders
 
@@ -317,8 +323,8 @@ def backtest_symbol(symbol, ltf_bars, htf_bars):
         "skipped_max_pos":     0,   # tracked at portfolio level, placeholder
     }
 
-    # We need at least RSI_PERIOD + 3 bars warmup
-    warmup = max(RSI_PERIOD, ATR_PERIOD, VOL_AVG_PERIOD) + 3
+    # We need at least RSI_PERIOD + RSI_DIV_LOOKBACK bars warmup
+    warmup = max(RSI_PERIOD, ATR_PERIOD, VOL_AVG_PERIOD) + RSI_DIV_LOOKBACK
 
     # We iterate up to len-2 because we need bar[i+1] for volume dropout
     # and bar[i+2] for entry (open of bar after confirmation)
@@ -381,7 +387,7 @@ def backtest_symbol(symbol, ltf_bars, htf_bars):
         open_positions = still_open
 
         # ── FILTER 1: Warmup check ────────────────────────────────────────
-        if (rsi_vals[i] is None or rsi_vals[i-3] is None or
+        if (rsi_vals[i] is None or rsi_vals[i-RSI_DIV_LOOKBACK] is None or
                 atr_vals[i] is None or vol_avgs[i] is None):
             filter_stats["warmup_none"] += 1
             continue
@@ -424,18 +430,18 @@ def backtest_symbol(symbol, ltf_bars, htf_bars):
 
         # ── FILTER 6: RSI divergence ──────────────────────────────────────
         rsi_now  = rsi_vals[i]
-        rsi_prev = rsi_vals[i - 3]
+        rsi_prev = rsi_vals[i - RSI_DIV_LOOKBACK]
 
         if long_candidate:
             # Bullish div: price made lower low, RSI made higher reading
-            price_lower_low = bar["l"] < ltf_bars[i - 3]["l"]
+            price_lower_low = bar["l"] < ltf_bars[i - RSI_DIV_LOOKBACK]["l"]
             rsi_higher      = rsi_now > rsi_prev
             if not (price_lower_low and rsi_higher):
                 filter_stats["rsi_divergence_fail"] += 1
                 continue
         else:
             # Bearish div: price made higher high, RSI made lower reading
-            price_higher_high = bar["h"] > ltf_bars[i - 3]["h"]
+            price_higher_high = bar["h"] > ltf_bars[i - RSI_DIV_LOOKBACK]["h"]
             rsi_lower         = rsi_now < rsi_prev
             if not (price_higher_high and rsi_lower):
                 filter_stats["rsi_divergence_fail"] += 1
@@ -707,7 +713,7 @@ def process_symbol(symbol):
 
 def main():
     print("=" * 65)
-    print("  LER — Liquidity Exhaustion Reversal Backtest")
+    print("  LER v2 — Liquidity Exhaustion Reversal Backtest (tuned)")
     print(f"  Period : {START_YEAR}-{START_MONTH:02d} → {END_YEAR}-{END_MONTH:02d}")
     print(f"  Coins  : {len(SYMBOLS)}")
     print(f"  Workers: {MAX_WORKERS}")
@@ -801,7 +807,7 @@ def main():
 
     # ── WRITE OUTPUTS ──────────────────────────────────────────────────────────
     with open("backtest_summary.txt", "w") as f:
-        f.write(f"LER Backtest Summary — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n")
+        f.write(f"LER v2 Backtest Summary — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n")
         f.write("=" * 65 + "\n")
         if agg:
             for k, v in agg.items():
@@ -820,7 +826,7 @@ def main():
 
     report = {
         "meta": {
-            "strategy":   "LER — Liquidity Exhaustion Reversal",
+            "strategy":   "LER v2 — Liquidity Exhaustion Reversal (tuned)",
             "period":     f"{START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}",
             "ltf":        INTERVAL_LTF,
             "htf":        INTERVAL_HTF,
