@@ -1,4 +1,4 @@
-here"""
+"""
 Strategy G — EMA Crossover + EMA50 Slope + ADX(14)
 8 VARIANTS: 4 rules × 2 timeframes (15m and 30m)
 
@@ -784,3 +784,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
