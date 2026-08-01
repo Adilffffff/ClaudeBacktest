@@ -1,4 +1,4 @@
-name: Strategy G — VAR_B (2% TP / 18% SL / 5x Isolated)
+name: Backtest Strategy G VAR_B
 
 on:
   workflow_dispatch:
@@ -6,13 +6,13 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -20,11 +20,10 @@ jobs:
       - name: Run backtest
         run: python backtest.py
 
-      - name: Upload artifacts
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: strategy-g-varb-results
+          name: backtest-results
           path: |
             backtest_summary.txt
             backtest_report.json
-          retention-days: 30
