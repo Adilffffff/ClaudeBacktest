@@ -1,4 +1,4 @@
-name: Strategy G Backtest
+name: Strategy G Backtest — 8 Variants (15m + 30m)
 
 on:
   workflow_dispatch:
@@ -6,12 +6,13 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -19,11 +20,22 @@ jobs:
       - name: Run backtest
         run: python backtest.py
 
-      - name: Upload results
+      - name: Upload summary
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: backtest-results
-          path: |
-            backtest_summary.txt
-            backtest_report.json
-          if-no-files-found: error
+          name: backtest-summary
+          path: backtest_summary.txt
+          retention-days: 30
+
+      - name: Upload JSON report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-report
+          path: backtest_report.json
+          retention-days: 30
+
+      - name: Print summary to log
+        if: always()
+        run: cat backtest_summary.txt || echo "no summary file"
