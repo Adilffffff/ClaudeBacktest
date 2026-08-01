@@ -1,30 +1,34 @@
 """
 Strategy G — EMA Crossover + EMA50 Slope + ADX(14) — 15m candles
-Fixed sizing: $1 margin × 5x leverage = $5 notional per trade
+Fixed sizing: $1 margin x leverage = notional per trade (non-compounding)
 
-TWO VARIANTS run in one script (single download pass):
+P&L FORMULA FIX (vs earlier version):
+  pnl = FIXED_MARGIN * net_pct   <-- correct: net_pct is already a
+                                      return-on-margin percentage.
+  The old code did `pnl = NOTIONAL * net_pct`, which applies leverage
+  TWICE (once via NOTIONAL = margin*leverage, again via net_pct =
+  raw_ret*leverage), inflating every win 5x. Fixed here.
 
-  VAR_B — original rules, no time limit
-           TP 2.0%  |  SL 18.0%  |  5x isolated  |  no max hold
+FOUR VARIANTS run in one script (single download pass):
+  VAR_B — TP 2.0% / SL 18.0% / no max hold
+  VAR_C — TP 2.0% / SL 18.0% / 10-day auto-close (960 bars)
+  VAR_D — TP 2.0% / SL 15.0% / 10-day auto-close (960 bars)
+  VAR_E — TP 1.5% / SL 11.0% / 10-day auto-close (960 bars)
 
-  VAR_C — identical to VAR_B + 10-day auto-close rule
-           If a position is still open after 960 bars (10 days × 24h × 4bars/h),
-           it is force-closed at the next bar's close regardless of P&L.
-
-Coin universe : 144 coins (full list)
-Period        : Jul 2024 – Jun 2026 (24 months)
+Coin universe : WHITELIST_G (56 coins) — extracted verbatim from
+                strategy_G_fable5.txt's "WHITELISTED COINS" section.
+                Nothing added, nothing else pulled from that doc.
+Period        : Jul 2024 - Jun 2026 (24 months)
 Capital       : $100 starting, $1 fixed margin per trade (never compounds)
 Max concurrent: 6 positions portfolio-wide
 Fees          : 0.05%/side  Slippage: 0.02%/side
 Entry         : close of signal bar (closed candle only, no lookahead)
 Exit          : TP or SL hit intra-bar (high/low test)
-              : VAR_C only — auto-close at bar 960 if neither TP nor SL hit
+              : auto-close at bar 960 if neither TP nor SL hit (VAR_C/D/E)
               : End of data — force-close any remaining open positions
 
-RULES ENFORCED (both variants):
-  - One position per coin at a time — a coin cannot open a new trade while
-    it already has one open; it only becomes eligible again once that
-    position is closed (TP, SL, timeout, or end-of-data force-close).
+RULES ENFORCED (all variants):
+  - One position per coin at a time.
   - Portfolio-wide cap of MAX_CONCURRENT open positions across all coins.
 """
 
@@ -32,58 +36,43 @@ import urllib.request, zipfile, csv, io, json, math
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# ── UNIVERSE (144 coins) ───────────────────────────────────────────────────────
+# -- WHITELIST (56 coins, from strategy_G_fable5.txt) ---------------------------
 COINS = [
-    "0GUSDT","1000000BOBUSDT","1000BONKUSDT","1000CATUSDT","1000RATSUSDT",
-    "1000SATSUSDT","A2ZUSDT","ACHUSDT","AI16ZUSDT","AINUSDT","AIOTUSDT",
-    "ALGOUSDT","ALICEUSDT","ALPINEUSDT","ANKRUSDT","ARKMUSDT","ASRUSDT",
-    "ASTERUSDT","ATAUSDT","AUSDT","AWEUSDT","AXLUSDT","BANDUSDT","BANKUSDT",
-    "BASEDUSDT","BASUSDT","BATUSDT","BDXNUSDT","BELUSDT","BIDUSDT","BMTUSDT",
-    "BTRUSDT","CFXUSDT","CHIPUSDT","COAIUSDT","COMBOUSDT","COMMONUSDT",
-    "COTIUSDT","CRCLUSDT","CUSDT","DAMUSDT","DEFIUSDT","DEXEUSDT","DIAUSDT",
-    "DMCUSDT","EIGENUSDT","ELSAUSDT","ENAUSDT","EPICUSDT","EPTUSDT","ESPUSDT",
-    "ETCUSDT","ETHUSDT","EVAAUSDT","FIOUSDT","FLNCUSDT","FLUXUSDT","FOLKSUSDT",
-    "FUNUSDT","FXSUSDT","GLMUSDT","GRIFFAINUSDT","GUAUSDT","HANAUSDT",
-    "HEMIUSDT","ICPUSDT","ICXUSDT","INITUSDT","IOSTUSDT","IOUSDT","IPUSDT",
-    "KITEUSDT","LABUSDT","LIGHTUSDT","LRCUSDT","LYNUSDT","MAGICUSDT","MAVUSDT",
-    "MEGAUSDT","MILKUSDT","MOODENGUSDT","MTLUSDT","NFPUSDT","NMRUSDT",
-    "NOMUSDT","NOTUSDT","OBOLUSDT","OMGUSDT","OPENUSDT","OPNUSDT","ORBSUSDT",
-    "PEOPLEUSDT","PIPPINUSDT","PIXELUSDT","PLUMEUSDT","POLUSDT","POWERUSDT",
-    "POWRUSDT","PROMPTUSDT","PTBUSDT","PUMPBTCUSDT","PUNDIXUSDT","QUICKUSDT",
-    "RAVEUSDT","REEFUSDT","RESOLVUSDT","REZUSDT","RLSUSDT","RVVUSDT",
-    "SAGAUSDT","SAHARAUSDT","SANTOSUSDT","SEIUSDT","SIGNUSDT","SKRUSDT",
-    "SNDKUSDT","SOMIUSDT","SPELLUSDT","SPKUSDT","STABLEUSDT","STBLUSDT",
-    "STXUSDT","TNSRUSDT","TRBUSDT","TRUTHUSDT","TURBOUSDT","UBUSDT",
-    "USUALUSDT","UXLINKUSDT","VANRYUSDT","VINEUSDT","VIRTUALUSDT","VVVUSDT",
-    "WAXPUSDT","WLDUSDT","XCNUSDT","XEMUSDT","XLMUSDT","XRPUSDT","YBUSDT",
-    "ZECUSDT","ZENUSDT","ZEREBROUSDT","ZKJUSDT",
+    "1000000BOBUSDT","1000CATUSDT","1000RATSUSDT","A2ZUSDT","AIOTUSDT",
+    "ALGOUSDT","ALPINEUSDT","ASTERUSDT","AUSDT","BASEDUSDT","BELUSDT",
+    "BIDUSDT","BMTUSDT","BTRUSDT","CFXUSDT","CHIPUSDT","CRCLUSDT",
+    "DAMUSDT","DEXEUSDT","DIAUSDT","EPTUSDT","ETHUSDT","FLNCUSDT",
+    "FUNUSDT","GLMUSDT","GUAUSDT","ICXUSDT","IOUSDT","LIGHTUSDT",
+    "MOODENGUSDT","NFPUSDT","NMRUSDT","NOTUSDT","ORBSUSDT","PEOPLEUSDT",
+    "PIPPINUSDT","POWERUSDT","POWRUSDT","RAVEUSDT","RESOLVUSDT","RVVUSDT",
+    "SEIUSDT","SIGNUSDT","SKRUSDT","SNDKUSDT","SOMIUSDT","SPELLUSDT",
+    "TRUTHUSDT","TURBOUSDT","VANRYUSDT","VINEUSDT","VVVUSDT","XEMUSDT",
+    "XRPUSDT","ZECUSDT","ZEREBROUSDT",
 ]
 
 INTERVAL        = "15m"
 START_YEAR, START_MONTH = 2024, 7
 END_YEAR,   END_MONTH   = 2026, 6
 
-# ── STRATEGY PARAMS (same for both variants) ───────────────────────────────────
+# -- STRATEGY PARAMS (shared across variants) ------------------------------------
 LEVERAGE        = 5
-TP_PCT          = 0.020       # 2.0%
-SL_PCT          = 0.180       # 18.0%
 START_CAPITAL   = 100.0
-FIXED_MARGIN    = 1.0         # $1 per trade — change to scale
+FIXED_MARGIN    = 1.0
 FEE_RATE        = 0.0005
 SLIP_RATE       = 0.0002
 ROUND_TRIP_COST = (FEE_RATE + SLIP_RATE) * 2
 MAX_CONCURRENT  = 6
 WARMUP_BARS     = 60
 
-# ── VARIANT PARAMS ─────────────────────────────────────────────────────────────
-# VAR_B: no time limit (None = disabled)
-# VAR_C: auto-close after 10 days = 10d × 24h × 60min / 15min = 960 bars
+# -- VARIANT PARAMS ---------------------------------------------------------------
 VARIANTS = [
-    {"name": "VAR_B", "max_hold_bars": None},
-    {"name": "VAR_C", "max_hold_bars": 960},
+    {"name": "VAR_B", "tp_pct": 0.020, "sl_pct": 0.18, "max_hold_bars": None},
+    {"name": "VAR_C", "tp_pct": 0.020, "sl_pct": 0.18, "max_hold_bars": 960},
+    {"name": "VAR_D", "tp_pct": 0.020, "sl_pct": 0.15, "max_hold_bars": 960},
+    {"name": "VAR_E", "tp_pct": 0.015, "sl_pct": 0.11, "max_hold_bars": 960},
 ]
 
-# ── INDICATOR PARAMS ──────────────────────────────────────────────────────────
+# -- INDICATOR PARAMS --------------------------------------------------------------
 EMA_FAST    = 9
 EMA_SLOW    = 21
 EMA_TREND   = 50
@@ -94,7 +83,7 @@ ADX_MIN     = 22.0
 
 BASE_URL = "https://data.binance.vision/data/futures/um/monthly/klines"
 
-# ── DATA ───────────────────────────────────────────────────────────────────────
+# -- DATA ---------------------------------------------------------------------------
 def month_range(sy, sm, ey, em):
     y, m = sy, sm
     while (y, m) <= (ey, em):
@@ -134,7 +123,7 @@ def fetch_symbol(symbol):
             seen.add(r["ts"]); out.append(r)
     return out
 
-# ── INDICATORS ─────────────────────────────────────────────────────────────────
+# -- INDICATORS -----------------------------------------------------------------------
 def calc_ema(values, period):
     k = 2.0 / (period + 1)
     ema = [0.0] * len(values)
@@ -174,8 +163,8 @@ def calc_adx(bars, period=14):
             dx[i] = 100 * abs(pdi - ndi) / d
     return wilder(dx)
 
-# ── PORTFOLIO SIMULATION ───────────────────────────────────────────────────────
-def run_portfolio(sym_inds, max_hold_bars, variant_name):
+# -- PORTFOLIO SIMULATION ---------------------------------------------------------------
+def run_portfolio(sym_inds, tp_pct, sl_pct, max_hold_bars, variant_name):
     NOTIONAL = FIXED_MARGIN * LEVERAGE
 
     events = []
@@ -211,7 +200,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
         bars = inds["bars"]
         bar  = bars[i]
 
-        # ── EXIT CHECK ──────────────────────────────────────────────────────────
+        # -- EXIT CHECK --------------------------------------------------------------
         if sym in open_pos:
             pos    = open_pos[sym]
             side   = pos["side"]
@@ -220,7 +209,6 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
             held   = i - pos["entry_bar"]
             hit_tp = hit_sl = timed_out = False
 
-            # VAR_C: 10-day auto-close fires before TP/SL check
             if max_hold_bars is not None and held >= max_hold_bars:
                 timed_out = True
             elif side == "LONG":
@@ -232,14 +220,16 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
 
             if hit_tp or hit_sl or timed_out:
                 if timed_out:
-                    exit_px = bar["close"]   # close at current bar's close
+                    exit_px = bar["close"]
                 else:
                     exit_px = tp if hit_tp else sl
 
                 ep      = pos["entry"]
                 raw_ret = (exit_px - ep)/ep if side == "LONG" else (ep - exit_px)/ep
                 net_pct = raw_ret * LEVERAGE - ROUND_TRIP_COST
-                pnl     = NOTIONAL * net_pct
+                # FIX: scale by MARGIN (net_pct is already a return-on-margin %),
+                # not by NOTIONAL (which would double-apply leverage).
+                pnl     = FIXED_MARGIN * net_pct
                 pnl     = max(pnl, -FIXED_MARGIN)
 
                 equity += pnl
@@ -264,7 +254,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
             if sym in open_pos:
                 continue
 
-        # ── WARMUP GUARD ───────────────────────────────────────────────────────
+        # -- WARMUP GUARD --------------------------------------------------------------
         if i < WARMUP_BARS:
             rej["warmup"] += 1
             continue
@@ -277,7 +267,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
             rej["max_concurrent"] += 1
             continue
 
-        # ── ENTRY FILTERS ──────────────────────────────────────────────────────
+        # -- ENTRY FILTERS --------------------------------------------------------------
         ema50    = inds["ema50"]
         slope    = (ema50[i] - ema50[i-SLOPE_BARS]) / ema50[i-SLOPE_BARS]
         long_ok  = slope >  SLOPE_MIN
@@ -307,14 +297,14 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
             rej["insuff_cap"] += 1
             continue
 
-        # ── OPEN POSITION ──────────────────────────────────────────────────────
+        # -- OPEN POSITION --------------------------------------------------------------
         entry_px = bar["close"]
         if direction == "LONG":
-            tp_px = entry_px * (1 + TP_PCT)
-            sl_px = entry_px * (1 - SL_PCT)
+            tp_px = entry_px * (1 + tp_pct)
+            sl_px = entry_px * (1 - sl_pct)
         else:
-            tp_px = entry_px * (1 - TP_PCT)
-            sl_px = entry_px * (1 + SL_PCT)
+            tp_px = entry_px * (1 - tp_pct)
+            sl_px = entry_px * (1 + sl_pct)
 
         open_pos[sym] = {
             "entry":      entry_px,
@@ -326,7 +316,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
         }
         rej["executed"] += 1
 
-    # ── FORCE-CLOSE any remaining open positions at end of data ────────────────
+    # -- FORCE-CLOSE any remaining open positions at end of data --------------------
     force_closed = 0
     for sym, pos in open_pos.items():
         bars    = sym_inds[sym]["bars"]
@@ -337,7 +327,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
         held    = len(bars) - 1 - pos["entry_bar"]
         raw_ret = (exit_px - ep)/ep if side == "LONG" else (ep - exit_px)/ep
         net_pct = raw_ret * LEVERAGE - ROUND_TRIP_COST
-        pnl     = NOTIONAL * net_pct
+        pnl     = FIXED_MARGIN * net_pct
         pnl     = max(pnl, -FIXED_MARGIN)
 
         equity += pnl
@@ -366,7 +356,7 @@ def run_portfolio(sym_inds, max_hold_bars, variant_name):
     print(f"  [{variant_name}] Done. Equity=${equity:,.2f}  Trades={len(closed)}  TimedOut={timed_out_count}")
     return closed, equity, rej
 
-# ── STATISTICS ─────────────────────────────────────────────────────────────────
+# -- STATISTICS -----------------------------------------------------------------------------
 def compute_stats(trades, start_cap, final_eq):
     if not trades:
         return None
@@ -486,31 +476,31 @@ def per_coin_stats(trades):
     rows.sort(key=lambda r: -r["profit_factor"])
     return rows
 
-# ── OUTPUT ─────────────────────────────────────────────────────────────────────
-def write_summary(variant_name, max_hold_bars, stats, coin_table, rej, loaded):
+# -- OUTPUT -----------------------------------------------------------------------------------
+def write_summary(variant_name, tp_pct, sl_pct, max_hold_bars, stats, coin_table, rej, loaded):
     lines = []
     a = lines.append
 
     hold_label = f"{max_hold_bars} bars ({max_hold_bars*15//60//24}d)" if max_hold_bars else "unlimited"
 
     a("=" * 70)
-    a(f"STRATEGY G — {variant_name}  |  TP 2.0%  SL 18.0%  5x Isolated")
+    a(f"STRATEGY G — {variant_name}  |  TP {tp_pct*100:.1f}%  SL {sl_pct*100:.1f}%  5x Isolated")
     a(f"Max hold : {hold_label}")
-    a(f"Sizing   : ${FIXED_MARGIN:.2f} margin × {LEVERAGE}x = ${FIXED_MARGIN*LEVERAGE:.2f} notional  (FIXED)")
+    a(f"Sizing   : ${FIXED_MARGIN:.2f} margin x {LEVERAGE}x = ${FIXED_MARGIN*LEVERAGE:.2f} notional  (FIXED, P&L formula: margin x leveraged-return%)")
     a(f"Period   : {START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}  |  Capital: ${START_CAPITAL:.2f}")
-    a(f"Universe : {len(COINS)} coins listed | {loaded} loaded with data")
+    a(f"Universe : {len(COINS)} whitelisted coins | {loaded} loaded with data")
     a("=" * 70)
 
     if stats is None:
         a("NO TRADES EXECUTED"); return "\n".join(lines)
 
-    verdict = "USABLE ✓" if (stats["profit_factor"] >= 1.5 and stats["win_rate"] >= 0.42) else "DOES NOT MEET TARGETS ✗"
+    verdict = "USABLE (candidate)" if (stats["profit_factor"] >= 1.5 and stats["win_rate"] >= 0.42) else "DOES NOT MEET TARGETS"
 
     a(f"Total Trades     : {stats['total_trades']:,}")
     a(f"Wins / Losses    : {stats['wins']:,} / {stats['losses']:,}")
     a(f"Force-closed EoD : {stats['forced_closed']:,}  (end of data)")
     if max_hold_bars:
-        a(f"Timed-out (10d)  : {stats['timed_out']:,}  (hit {max_hold_bars}-bar limit)")
+        a(f"Timed-out ({max_hold_bars*15//60//24}d)  : {stats['timed_out']:,}  (hit {max_hold_bars}-bar limit)")
     a(f"Win Rate         : {stats['win_rate']*100:.2f}%")
     a(f"Profit Factor    : {stats['profit_factor']:.4f}")
     a(f"Net PnL          : ${stats['net_pnl']:,.2f}  (on ${START_CAPITAL:.2f} starting capital)")
@@ -564,14 +554,13 @@ def write_summary(variant_name, max_hold_bars, stats, coin_table, rej, loaded):
 
     return "\n".join(lines)
 
-# ── MAIN ───────────────────────────────────────────────────────────────────────
+# -- MAIN --------------------------------------------------------------------------------------
 def main():
-    print(f"Strategy G — TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  {LEVERAGE}x Isolated  |  Fixed ${FIXED_MARGIN}/trade")
-    print(f"Variants: {[v['name'] for v in VARIANTS]}")
-    print(f"Period: {START_YEAR}-{START_MONTH:02d} → {END_YEAR}-{END_MONTH:02d}  |  {len(COINS)} coins")
+    print(f"Strategy G — 4 variants  |  5x Isolated  |  Fixed ${FIXED_MARGIN}/trade margin")
+    print(f"Variants: {[(v['name'], v['tp_pct'], v['sl_pct'], v['max_hold_bars']) for v in VARIANTS]}")
+    print(f"Period: {START_YEAR}-{START_MONTH:02d} -> {END_YEAR}-{END_MONTH:02d}  |  {len(COINS)} whitelisted coins")
     print()
 
-    # ── Phase 1: Download once, reuse for both variants ──
     print(f"Phase 1: Downloading {len(COINS)} symbols (50 workers)...")
     all_bars = {}
     with ProcessPoolExecutor(max_workers=50) as ex:
@@ -582,20 +571,19 @@ def main():
                 bars = fut.result()
                 if bars:
                     all_bars[sym] = bars
-                    print(f"  ✓ {sym}: {len(bars):,} bars")
+                    print(f"  OK {sym}: {len(bars):,} bars")
                 else:
-                    print(f"  ✗ {sym}: no data")
+                    print(f"  MISS {sym}: no data")
             except Exception as e:
-                print(f"  ✗ {sym}: {e}")
+                print(f"  ERR {sym}: {e}")
 
     loaded = len(all_bars)
     print(f"\nLoaded {loaded}/{len(COINS)} symbols")
     if loaded == 0:
         print("FATAL: 0 symbols loaded."); return
-    if loaded < len(COINS) * 0.1:
-        print("FATAL: <10% loaded — probable network block."); return
+    if loaded < len(COINS) * 0.5:
+        print("WARNING: less than half the whitelist loaded — check symbol names / delistings.")
 
-    # ── Phase 2: Precompute indicators once ──
     print("\nPhase 2: Computing indicators...")
     sym_inds = {}
     for sym, bars in all_bars.items():
@@ -611,16 +599,17 @@ def main():
         }
     print(f"  {len(sym_inds)} symbols ready.")
 
-    # ── Phase 3: Run both variants ──
     all_results = {}
     for v in VARIANTS:
         vname     = v["name"]
+        tp_pct    = v["tp_pct"]
+        sl_pct    = v["sl_pct"]
         max_hold  = v["max_hold_bars"]
-        print(f"\nPhase 3 [{vname}]: Simulating (max_hold={max_hold})...")
-        trades, final_eq, rej = run_portfolio(sym_inds, max_hold, vname)
+        print(f"\nPhase 3 [{vname}]: Simulating (TP={tp_pct*100:.1f}% SL={sl_pct*100:.1f}% max_hold={max_hold})...")
+        trades, final_eq, rej = run_portfolio(sym_inds, tp_pct, sl_pct, max_hold, vname)
         stats      = compute_stats(trades, START_CAPITAL, final_eq)
         coin_table = per_coin_stats(trades)
-        summary    = write_summary(vname, max_hold, stats, coin_table, rej, loaded)
+        summary    = write_summary(vname, tp_pct, sl_pct, max_hold, stats, coin_table, rej, loaded)
         all_results[vname] = {
             "trades": trades, "final_eq": final_eq,
             "rej": rej, "stats": stats,
@@ -628,7 +617,6 @@ def main():
         }
         print("\n" + summary)
 
-    # ── Write outputs ──
     combined_summary = "\n\n" + ("=" * 70) + "\n\n".join(
         all_results[v["name"]]["summary"] for v in VARIANTS
     )
@@ -637,13 +625,11 @@ def main():
 
     report = {
         "meta": {
-            "strategy":       "Strategy G",
+            "strategy":       "Strategy G (P&L-fixed, whitelist-only)",
             "variants":       [v["name"] for v in VARIANTS],
             "sizing":         "fixed",
             "fixed_margin":   FIXED_MARGIN,
             "notional":       FIXED_MARGIN * LEVERAGE,
-            "tp_pct":         TP_PCT,
-            "sl_pct":         SL_PCT,
             "leverage":       LEVERAGE,
             "margin_type":    "isolated",
             "period":         f"{START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}",
@@ -659,6 +645,8 @@ def main():
         vname = v["name"]
         r     = all_results[vname]
         report[vname] = {
+            "tp_pct":        v["tp_pct"],
+            "sl_pct":        v["sl_pct"],
             "max_hold_bars": v["max_hold_bars"],
             "aggregate":     r["stats"],
             "filter_stats":  r["rej"],
@@ -670,7 +658,7 @@ def main():
         json.dump(report, f, indent=2, default=str)
 
     print("\nOutputs: backtest_summary.txt  backtest_report.json")
-    print("Done ✓")
+    print("Done")
 
 if __name__ == "__main__":
     main()
