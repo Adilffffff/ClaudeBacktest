@@ -1,4 +1,4 @@
-name: LER Backtest
+name: Strategy G — Leverage Variants Backtest
 
 on:
   workflow_dispatch:
@@ -6,10 +6,10 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
@@ -17,14 +17,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run LER backtest
-        run: python backtest.py
+      - name: Run leverage backtest (2x–10x isolated)
+        run: python backtest_leverage.py
 
       - name: Upload results
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: ler-backtest-results
+          name: leverage-backtest-results
           path: |
-            backtest_summary.txt
-            backtest_report.json
+            backtest_leverage_summary.txt
+            backtest_leverage_report.json
           retention-days: 30
