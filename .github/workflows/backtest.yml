@@ -1,4 +1,4 @@
-name: Strategy G — Leverage Variants Backtest
+name: Strategy G — Fixed $1 Per Trade (144 Coins)
 
 on:
   workflow_dispatch:
@@ -17,15 +17,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run leverage backtest (2x–10x isolated)
-        run: python backtest_leverage.py
+      - name: Run backtest (Variant A + B)
+        run: python backtest_fixed.py
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: leverage-backtest-results
+          name: fixed-backtest-results
           path: |
-            backtest_leverage_summary.txt
-            backtest_leverage_report.json
+            backtest_fixed_summary.txt
+            backtest_fixed_report.json
           retention-days: 30
