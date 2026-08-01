@@ -1,4 +1,4 @@
-name: Strategy G — 5x Isolated (3 Variants)
+name: Strategy G — VAR_B (2% TP / 18% SL / 5x Isolated)
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-results-strategy-g-5x
+          name: strategy-g-varb-results
           path: |
             backtest_summary.txt
             backtest_report.json
