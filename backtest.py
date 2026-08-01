@@ -2,12 +2,16 @@
 Strategy G — EMA Crossover + EMA50 Slope + ADX(14) — 15m candles
 VARIANT VAR_B only: TP 2.0%, SL 18.0%, 5x leverage, isolated margin
 
-Isolated margin: each trade's max loss = margin posted (notional / leverage).
+FIXED SIZING: Each trade posts FIXED_MARGIN dollars regardless of equity.
+Notional = FIXED_MARGIN * LEVERAGE (e.g. $1 * 5 = $5 per trade).
+This removes compounding and gives realistic, actionable dollar results.
+
+Isolated margin: max loss per trade = FIXED_MARGIN (can never lose more).
 At 5x leverage, liquidation ≈ 20% adverse move. SL=18% fires before liq. ✓
 
 Coin universe : 56-coin whitelist from Variant G v11.0
 Period        : Jul 2024 – Jun 2026 (24 months)
-Capital       : $10,000 shared, compounding 0.75% risk per trade
+Capital       : $100 starting, fixed $1 margin per trade (not compounding)
 Max concurrent: 6 positions portfolio-wide
 Fees          : 0.05%/side  Slippage: 0.02%/side
 Entry         : close of signal bar (closed candle only, no lookahead)
@@ -42,15 +46,24 @@ END_YEAR,   END_MONTH   = 2026, 6
 LEVERAGE        = 5
 TP_PCT          = 0.020       # 2.0%
 SL_PCT          = 0.180       # 18.0%
-RISK_PCT        = 0.0075      # 0.75% of current equity per trade
+
+# ── FIXED SIZING (the key change) ─────────────────────────────────────────────
+# FIXED_MARGIN  : dollars posted as margin per trade (your actual capital at risk)
+# NOTIONAL      : FIXED_MARGIN * LEVERAGE  (the position size)
+# e.g. $1 margin × 5x = $5 notional.  Max loss per trade = $1 (isolated).
+START_CAPITAL   = 100.0       # starting wallet balance ($100)
+FIXED_MARGIN    = 1.0         # dollars posted per trade — change this to scale
+
+# ── FEES / COSTS ──────────────────────────────────────────────────────────────
 FEE_RATE        = 0.0005      # 0.05% per side
 SLIP_RATE       = 0.0002      # 0.02% per side
 ROUND_TRIP_COST = (FEE_RATE + SLIP_RATE) * 2   # applied to notional
 
+# ── PORTFOLIO CONFIG ───────────────────────────────────────────────────────────
 MAX_CONCURRENT  = 6
-START_CAPITAL   = 10_000.0
 WARMUP_BARS     = 60
 
+# ── INDICATOR PARAMS ──────────────────────────────────────────────────────────
 EMA_FAST        = 9
 EMA_SLOW        = 21
 EMA_TREND       = 50
@@ -95,7 +108,6 @@ def fetch_symbol(symbol):
         except Exception:
             pass   # 404 = coin didn't exist that month; skip silently
     rows.sort(key=lambda r: r["ts"])
-    # deduplicate (overlapping monthly files)
     seen, out = set(), []
     for r in rows:
         if r["ts"] not in seen:
@@ -145,7 +157,8 @@ def calc_adx(bars, period=14):
 
 # ── PORTFOLIO SIMULATION ───────────────────────────────────────────────────────
 def run_portfolio(all_bars):
-    # ── precompute indicators ──
+    NOTIONAL = FIXED_MARGIN * LEVERAGE   # e.g. $1 × 5 = $5 per trade
+
     print("Computing indicators...")
     sym_inds = {}
     for sym, bars in all_bars.items():
@@ -160,7 +173,6 @@ def run_portfolio(all_bars):
             "bars":  bars,
         }
 
-    # ── build unified timeline: (ts, symbol, bar_index) ──
     events = []
     for sym, inds in sym_inds.items():
         for i, bar in enumerate(inds["bars"]):
@@ -168,12 +180,10 @@ def run_portfolio(all_bars):
     events.sort()
     print(f"Processing {len(events):,} bar events across {len(sym_inds)} symbols...")
 
-    # ── portfolio state ──
     equity      = START_CAPITAL
-    open_pos    = {}   # symbol → position dict (only one per symbol at a time)
-    closed      = []   # finished trade records
+    open_pos    = {}
+    closed      = []
 
-    # filter rejection counters
     rej = {
         "warmup":        0,
         "sym_open":      0,
@@ -190,13 +200,13 @@ def run_portfolio(all_bars):
     for step, (ts, sym, i) in enumerate(events):
         if step % progress_step == 0:
             pct = step / len(events) * 100
-            print(f"  {pct:.0f}%  equity=${equity:,.0f}  open={len(open_pos)}  trades={len(closed)}")
+            print(f"  {pct:.0f}%  equity=${equity:,.2f}  open={len(open_pos)}  trades={len(closed)}")
 
         inds = sym_inds[sym]
         bars = inds["bars"]
         bar  = bars[i]
 
-        # ── EXIT CHECK (must happen before entry, on every bar while open) ──
+        # ── EXIT CHECK ──
         if sym in open_pos:
             pos  = open_pos[sym]
             side = pos["side"]
@@ -207,7 +217,7 @@ def run_portfolio(all_bars):
             if side == "LONG":
                 if bar["high"] >= tp:   hit_tp = True
                 elif bar["low"] <= sl:  hit_sl = True
-            else:  # SHORT
+            else:
                 if bar["low"] <= tp:    hit_tp = True
                 elif bar["high"] >= sl: hit_sl = True
 
@@ -215,10 +225,9 @@ def run_portfolio(all_bars):
                 exit_px = tp if hit_tp else sl
                 ep      = pos["entry"]
                 raw_ret = (exit_px - ep)/ep if side == "LONG" else (ep - exit_px)/ep
-                # leverage amplifies the price move; fees deducted on notional
                 net_pct = raw_ret * LEVERAGE - ROUND_TRIP_COST
-                pnl     = pos["notional"] * net_pct
-                pnl     = max(pnl, -pos["margin"])   # isolated: floor at margin
+                pnl     = NOTIONAL * net_pct
+                pnl     = max(pnl, -FIXED_MARGIN)   # isolated: floor at margin
 
                 equity += pnl
                 closed.append({
@@ -228,7 +237,8 @@ def run_portfolio(all_bars):
                     "exit_ts":   ts,
                     "entry_px":  ep,
                     "exit_px":   exit_px,
-                    "notional":  pos["notional"],
+                    "notional":  NOTIONAL,
+                    "margin":    FIXED_MARGIN,
                     "pnl":       pnl,
                     "win":       pnl > 0,
                     "duration":  i - pos["entry_bar"],
@@ -236,9 +246,7 @@ def run_portfolio(all_bars):
                     "forced":    False,
                 })
                 del open_pos[sym]
-                # ← do NOT allow re-entry on same bar; continue to next event
 
-            # position still open → skip entry check for this symbol
             if sym in open_pos:
                 continue
 
@@ -247,28 +255,23 @@ def run_portfolio(all_bars):
             rej["warmup"] += 1
             continue
 
-        # ── ENTRY FILTERS ──
-
-        # already in a trade for this symbol (shouldn't reach here, but guard)
         if sym in open_pos:
             rej["sym_open"] += 1
             continue
 
-        # portfolio concurrent cap — count locked margin vs current equity
         if len(open_pos) >= MAX_CONCURRENT:
             rej["max_concurrent"] += 1
             continue
 
-        # Filter 1: EMA50 slope
-        ema50 = inds["ema50"]
-        slope = (ema50[i] - ema50[i-SLOPE_BARS]) / ema50[i-SLOPE_BARS]
+        # ── ENTRY FILTERS ──
+        ema50  = inds["ema50"]
+        slope  = (ema50[i] - ema50[i-SLOPE_BARS]) / ema50[i-SLOPE_BARS]
         long_ok  = slope >  SLOPE_MIN
         short_ok = slope < -SLOPE_MIN
         if not long_ok and not short_ok:
             rej["slope"] += 1
             continue
 
-        # Filter 2: EMA9/EMA21 crossover (confirmed on closed bar)
         ema9  = inds["ema9"]
         ema21 = inds["ema21"]
         cross_long  = ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1]
@@ -282,21 +285,15 @@ def run_portfolio(all_bars):
             rej["no_cross"] += 1
             continue
 
-        # Filter 3: ADX minimum
         adx = inds["adx"]
         if adx[i] < ADX_MIN:
             rej["adx"] += 1
             continue
 
-        # ── POSITION SIZING ──
-        # notional sized so that SL_PCT move = RISK_PCT of equity (at 1x)
-        # at leverage L, price only needs to move SL_PCT in notional terms
-        # margin posted = notional / leverage
-        risk_dollar = equity * RISK_PCT
-        notional    = risk_dollar / SL_PCT     # 1x-equivalent notional
-        margin      = notional / LEVERAGE      # actual capital locked
-
-        if equity < margin:
+        # ── POSITION SIZING (fixed) ──
+        # Each trade always uses FIXED_MARGIN regardless of equity.
+        # Only reject if wallet can't cover the margin (protects against blowing up).
+        if equity < FIXED_MARGIN:
             rej["insuff_cap"] += 1
             continue
 
@@ -316,14 +313,10 @@ def run_portfolio(all_bars):
             "side":       direction,
             "tp":         tp_px,
             "sl":         sl_px,
-            "notional":   notional,
-            "margin":     margin,
         }
         rej["executed"] += 1
 
-    # ── FORCE-CLOSE any positions still open at end of data ──
-    # These are trades that never hit TP or SL — close at last available bar close.
-    # This is conservative (realistic worst-case) and prevents survivorship bias.
+    # ── FORCE-CLOSE open positions at end of data ──
     force_closed = 0
     for sym, pos in open_pos.items():
         bars    = sym_inds[sym]["bars"]
@@ -333,8 +326,8 @@ def run_portfolio(all_bars):
         side    = pos["side"]
         raw_ret = (exit_px - ep)/ep if side == "LONG" else (ep - exit_px)/ep
         net_pct = raw_ret * LEVERAGE - ROUND_TRIP_COST
-        pnl     = pos["notional"] * net_pct
-        pnl     = max(pnl, -pos["margin"])
+        pnl     = NOTIONAL * net_pct
+        pnl     = max(pnl, -FIXED_MARGIN)
 
         equity += pnl
         closed.append({
@@ -344,7 +337,8 @@ def run_portfolio(all_bars):
             "exit_ts":   last["ts"],
             "entry_px":  ep,
             "exit_px":   exit_px,
-            "notional":  pos["notional"],
+            "notional":  NOTIONAL,
+            "margin":    FIXED_MARGIN,
             "pnl":       pnl,
             "win":       pnl > 0,
             "duration":  len(bars) - 1 - pos["entry_bar"],
@@ -376,7 +370,6 @@ def compute_stats(trades, start_cap, final_eq):
     exp = sum(t["pnl"] for t in trades) / n
     avg_dur = sum(t["duration"] for t in trades) / n
 
-    # Equity curve (chronological by exit_ts)
     trades_sorted = sorted(trades, key=lambda t: t["exit_ts"])
     eq = start_cap
     equity_curve = [eq]
@@ -390,14 +383,12 @@ def compute_stats(trades, start_cap, final_eq):
         dd = (peak - v) / peak
         max_dd = max(max_dd, dd)
 
-    # Monthly PnL
     monthly = {}
     for t in trades_sorted:
         dt  = datetime.fromtimestamp(t["exit_ts"]/1000, tz=timezone.utc)
         key = f"{dt.year}-{dt.month:02d}"
         monthly[key] = monthly.get(key, 0) + t["pnl"]
 
-    # Sharpe / Sortino on daily PnL
     daily = {}
     for t in trades_sorted:
         dt  = datetime.fromtimestamp(t["exit_ts"]/1000, tz=timezone.utc)
@@ -414,7 +405,6 @@ def compute_stats(trades, start_cap, final_eq):
         if neg_sq:
             sortino = mu/math.sqrt(neg_sq) * math.sqrt(365)
 
-    # Streaks
     bws = bloss = cw = cl = 0
     for t in trades_sorted:
         if t["win"]:
@@ -482,7 +472,8 @@ def write_summary(stats, coin_table, rej, loaded):
 
     a("=" * 66)
     a("STRATEGY G — VAR_B  |  TP 2.0%  SL 18.0%  5x Isolated")
-    a(f"Period: {START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}")
+    a(f"SIZING: ${FIXED_MARGIN:.2f} margin per trade × {LEVERAGE}x = ${FIXED_MARGIN*LEVERAGE:.2f} notional  (FIXED, not compounding)")
+    a(f"Period: {START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}  |  Starting capital: ${START_CAPITAL:.2f}")
     a(f"Universe: {len(COINS)} coins listed | {loaded} loaded with data")
     a("=" * 66)
 
@@ -496,21 +487,27 @@ def write_summary(stats, coin_table, rej, loaded):
     a(f"Force-closed     : {stats['forced_closed']:,}  (open at end of data, closed at last bar)")
     a(f"Win Rate         : {stats['win_rate']*100:.2f}%")
     a(f"Profit Factor    : {stats['profit_factor']:.4f}")
-    a(f"Net PnL          : ${stats['net_pnl']:,.2f}")
+    a(f"Net PnL          : ${stats['net_pnl']:,.2f}  (on ${START_CAPITAL:.2f} starting capital)")
     a(f"Final Equity     : ${stats['final_equity']:,.2f}")
-    a(f"Starting Capital : ${START_CAPITAL:,.2f}")
     a(f"Max Drawdown     : {stats['max_drawdown']*100:.2f}%")
     a(f"Sharpe           : {stats['sharpe']:.3f}")
     a(f"Sortino          : {stats['sortino']:.3f}")
-    a(f"Avg Win          : ${stats['avg_win']:,.2f}")
-    a(f"Avg Loss         : ${stats['avg_loss']:,.2f}")
-    a(f"Expectancy       : ${stats['expectancy']:,.2f} per trade")
+    a(f"Avg Win          : ${stats['avg_win']:.4f}  per trade")
+    a(f"Avg Loss         : ${stats['avg_loss']:.4f}  per trade")
+    a(f"Expectancy       : ${stats['expectancy']:.4f} per trade")
     a(f"Avg Duration     : {stats['avg_duration']:.1f} bars  ({stats['avg_duration']*15/60:.1f} hours)")
     a(f"Long  Trades     : {stats['long_trades']:,}  WR {stats['long_wr']*100:.2f}%")
     a(f"Short Trades     : {stats['short_trades']:,}  WR {stats['short_wr']*100:.2f}%")
     a(f"Best Win Streak  : {stats['best_win_streak']}")
     a(f"Best Loss Streak : {stats['best_loss_streak']}")
     a(f"VERDICT          : {verdict}")
+
+    a("")
+    a(f"── Scale reference ─────────────────────────────────────────────")
+    a(f"  $1/trade margin → Net PnL ${stats['net_pnl']:,.2f} over 24 months")
+    a(f"  $10/trade       → ~${stats['net_pnl']*10:,.0f}")
+    a(f"  $50/trade       → ~${stats['net_pnl']*50:,.0f}")
+    a(f"  $100/trade      → ~${stats['net_pnl']*100:,.0f}")
 
     a("")
     a("── Filter Rejection Stats ──────────────────────────────────────")
@@ -529,24 +526,24 @@ def write_summary(stats, coin_table, rej, loaded):
     a("── Monthly PnL ─────────────────────────────────────────────────")
     for ym, pnl in stats["monthly_pnl"].items():
         sign = "+" if pnl >= 0 else ""
-        a(f"  {ym}: ${sign}{pnl:,.2f}")
+        a(f"  {ym}: ${sign}{pnl:,.4f}")
 
     a("")
     a("── Per-Coin Table (sorted by Profit Factor) ────────────────────")
     a(f"  {'Symbol':<22} {'PF':>6}  {'WR':>7}  {'Trades':>7}  {'Net PnL':>12}")
     for r in coin_table:
         pf_s = f"{r['profit_factor']:.3f}" if r["profit_factor"] != float("inf") else "  INF"
-        a(f"  {r['symbol']:<22} {pf_s:>6}  {r['win_rate']*100:>6.1f}%  {r['trades']:>7,}  ${r['net_pnl']:>11,.2f}")
+        a(f"  {r['symbol']:<22} {pf_s:>6}  {r['win_rate']*100:>6.1f}%  {r['trades']:>7,}  ${r['net_pnl']:>11,.4f}")
 
     return "\n".join(lines)
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
-    print(f"Strategy G VAR_B — TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  5x Isolated")
+    print(f"Strategy G VAR_B — TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  {LEVERAGE}x Isolated")
+    print(f"FIXED SIZING: ${FIXED_MARGIN:.2f} margin × {LEVERAGE}x = ${FIXED_MARGIN*LEVERAGE:.2f} notional per trade")
     print(f"Period: {START_YEAR}-{START_MONTH:02d} → {END_YEAR}-{END_MONTH:02d}  |  {len(COINS)} coins")
     print()
 
-    # ── Phase 1: Download ──
     print(f"Phase 1: Downloading {len(COINS)} symbols (50 workers)...")
     all_bars = {}
     with ProcessPoolExecutor(max_workers=50) as ex:
@@ -568,42 +565,39 @@ def main():
     if loaded == 0:
         print("FATAL: 0 symbols loaded — check data source / network.")
         return
-
-    # abort-on-zero-data safety: if >90% symbols fail, something is wrong
     if loaded < len(COINS) * 0.1:
         print("FATAL: <10% of symbols loaded — probable network block on data.binance.vision.")
         return
 
-    # ── Phase 2: Simulate ──
     print("\nPhase 2: Portfolio simulation...")
     trades, final_eq, rej = run_portfolio(all_bars)
 
-    # ── Phase 3: Stats ──
     stats      = compute_stats(trades, START_CAPITAL, final_eq)
     coin_table = per_coin_stats(trades)
     summary    = write_summary(stats, coin_table, rej, loaded)
 
     print("\n" + summary)
 
-    # ── Write outputs ──
     with open("backtest_summary.txt", "w") as f:
         f.write(summary + "\n")
 
     report = {
         "meta": {
-            "strategy":      "Strategy G VAR_B",
-            "tp_pct":        TP_PCT,
-            "sl_pct":        SL_PCT,
-            "leverage":      LEVERAGE,
-            "margin_type":   "isolated",
-            "period":        f"{START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}",
-            "start_capital": START_CAPITAL,
-            "risk_pct":      RISK_PCT,
-            "fee_pct":       FEE_RATE,
-            "slip_pct":      SLIP_RATE,
-            "max_concurrent":MAX_CONCURRENT,
-            "coins_listed":  len(COINS),
-            "coins_loaded":  loaded,
+            "strategy":       "Strategy G VAR_B",
+            "sizing":         "fixed",
+            "fixed_margin":   FIXED_MARGIN,
+            "notional":       FIXED_MARGIN * LEVERAGE,
+            "tp_pct":         TP_PCT,
+            "sl_pct":         SL_PCT,
+            "leverage":       LEVERAGE,
+            "margin_type":    "isolated",
+            "period":         f"{START_YEAR}-{START_MONTH:02d} to {END_YEAR}-{END_MONTH:02d}",
+            "start_capital":  START_CAPITAL,
+            "fee_pct":        FEE_RATE,
+            "slip_pct":       SLIP_RATE,
+            "max_concurrent": MAX_CONCURRENT,
+            "coins_listed":   len(COINS),
+            "coins_loaded":   loaded,
         },
         "aggregate":    stats,
         "filter_stats": rej,
