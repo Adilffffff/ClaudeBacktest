@@ -1,4 +1,4 @@
-name: Strategy G — Fixed $1 Per Trade (144 Coins)
+name: Strategy G — 5x Isolated (3 Variants)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
@@ -17,15 +17,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run backtest (Variant A + B)
-        run: python backtest_fixed.py
+      - name: Run backtest
+        run: python backtest.py
 
-      - name: Upload results
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: fixed-backtest-results
+          name: backtest-results-strategy-g-5x
           path: |
-            backtest_fixed_summary.txt
-            backtest_fixed_report.json
+            backtest_summary.txt
+            backtest_report.json
           retention-days: 30
