@@ -1,4 +1,4 @@
-name: Backtest Strategy G VAR_B
+name: Strategy G Backtest
 
 on:
   workflow_dispatch:
@@ -6,10 +6,9 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 120
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -27,3 +26,4 @@ jobs:
           path: |
             backtest_summary.txt
             backtest_report.json
+          if-no-files-found: error
