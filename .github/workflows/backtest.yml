@@ -1,4 +1,4 @@
-name: Strategy G Backtest — 8 Variants (15m + 30m)
+name: Strategy G VAR-D Stress Tests
 
 on:
   workflow_dispatch:
@@ -6,10 +6,10 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
@@ -20,22 +20,12 @@ jobs:
       - name: Run backtest
         run: python backtest.py
 
-      - name: Upload summary
+      - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: backtest-summary
-          path: backtest_summary.txt
+          name: backtest-results-${{ github.run_number }}
+          path: |
+            backtest_summary.txt
+            backtest_report.json
           retention-days: 30
-
-      - name: Upload JSON report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: backtest-report
-          path: backtest_report.json
-          retention-days: 30
-
-      - name: Print summary to log
-        if: always()
-        run: cat backtest_summary.txt || echo "no summary file"
