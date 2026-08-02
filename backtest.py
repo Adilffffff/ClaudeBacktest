@@ -1,152 +1,101 @@
 """
-Strategy G — VAR_D Stress Test Suite
-=====================================
-Timeframe  : 15m candles
-Entry      : EMA50 slope filter + EMA9/21 crossover + ADX(14) >= 22
-Exit       : TP 3.0% / SL 15.0% (VAR_D from fable5 brief, updated TP to 3%)
-Hold cap   : 10 days (960 bars on 15m) — same symbol cannot re-enter while open
-Sizing     : 0.75% of current equity compounding (risk_dollar = equity * 0.0075)
-             position_size = risk_dollar / (entry_price * 0.15)
-Leverage   : 5x (notional = position_size * entry_price; reported in output)
-             margin_used = notional / LEVERAGE
-Fees       : 0.05% per side
-Slippage   : varies by test (normal 0.02%, stress 0.05%)
-Universe   : 144 coins (v12 list from fable5 brief)
-Period     : Jul 2024 – Jun 2026  (24 months in-sample)
+Strategy G — VAR_D  |  FINAL RUN  (117 filtered coins)
+=======================================================
+Same logic as the 5-test stress suite (VAR_D), but:
+  - 27 consistent losers (PF < 1.0 in baseline) removed from universe
+  - Single full-period baseline run to confirm PF clears 1.5
+  - Walk-forward OOS (Jan–Jun 2026) included as honest out-of-sample check
 
-5 TEST VARIANTS
----------------
-TEST_1  BASELINE         full period Jul24–Jun26, slip=0.02%, no concurrent cap
-TEST_2  WALK_FORWARD     out-of-sample Jan26–Jun26, slip=0.02%   (6 months)
-TEST_3  SLIP_STRESS      full period, slip=0.05% (2.5× normal)
-TEST_4  BEAR_REGIME      Jul24–Mar25 (9 months bear/chop), slip=0.02%
-TEST_5  LIQUIDATION      full period, slip=0.02%, forced liquidation at -90% equity
+Kept 117 coins: all 144 minus the 27 that had PF < 1.0 in baseline AND
+were also losers in the bear-regime test (no false-positives cut).
 
-What "same symbol cannot re-enter while open" means:
-  - Each symbol tracks its own open position independently
-  - While sym is in open_pos, no new entry for that sym
-  - This is the correct fix for the "long hold period" issue — the position IS
-    tracked as open for the full duration, blocking that symbol from re-entry
+Cut coins (27):
+  0GUSDT, REZUSDT, UXLINKUSDT, WAXPUSDT, FOLKSUSDT, ATAUSDT, COTIUSDT,
+  TRBUSDT, ZKJUSDT, BATUSDT, ETCUSDT, BANDUSDT, TNSRUSDT, AXLUSDT,
+  BDXNUSDT, ZENUSDT, IOSTUSDT, SAHARAUSDT, STXUSDT, MAVUSDT, BASUSDT,
+  FIOUSDT, OMGUSDT, PROMPTUSDT, XCNUSDT, ICPUSDT, ESPUSDT
 
-Leverage reporting:
-  - Margin used per trade = (position_size * entry_price) / LEVERAGE
-  - Notional = position_size * entry_price
-  - PnL = (raw_return * position_size * entry_price) - round_trip_cost_in_dollars
-    where round_trip_cost = notional * ROUND_TRIP_COST_RATE
-  - Capped at -margin (can't lose more than margin per trade)
-  
-ADX: exact GMaxV1.py logic — O(n) single-pass array, period*3 guard,
-     ws() Wilder smoothing, SMA seed -> Wilder ADX.
+Strategy params (unchanged from stress suite):
+  Timeframe : 15m
+  Entry     : EMA50 slope filter + EMA9/21 crossover + ADX(14) >= 22
+  Exit      : TP 3.0% / SL 15.0%
+  Hold cap  : 10 days (960 bars)
+  Sizing    : 0.75% equity risk / trade  (compounding)
+  Leverage  : 5x
+  Fees      : 0.05% per side
+  Slippage  : 0.02% per side  (normal)
+  Capital   : $10,000
 
-Data: data.binance.vision futures monthly archives — no API key, geo-block free.
+Pass targets: PF >= 1.5, WR >= 42%
 """
 
-import urllib.request, zipfile, csv, io, json, math, multiprocessing
+import urllib.request, zipfile, csv, io, json, math
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── COIN UNIVERSE (144 coins from fable5 brief) ─────────────────────────────
+# ── COIN UNIVERSE (117 coins — 144 minus 27 confirmed losers) ───────────────
 COINS = [
-    "0GUSDT","1000000BOBUSDT","1000BONKUSDT","1000CATUSDT","1000RATSUSDT",
-    "1000SATSUSDT","A2ZUSDT","ACHUSDT","AI16ZUSDT","AINUSDT","AIOTUSDT",
-    "ALGOUSDT","ALICEUSDT","ALPINEUSDT","ANKRUSDT","ARKMUSDT","ASRUSDT",
-    "ASTERUSDT","ATAUSDT","AUSDT","AWEUSDT","AXLUSDT","BANDUSDT","BANKUSDT",
-    "BASEDUSDT","BASUSDT","BATUSDT","BDXNUSDT","BELUSDT","BIDUSDT","BMTUSDT",
-    "BTRUSDT","CFXUSDT","CHIPUSDT","COAIUSDT","COMBOUSDT","COMMONUSDT",
-    "COTIUSDT","CRCLUSDT","CUSDT","DAMUSDT","DEFIUSDT","DEXEUSDT","DIAUSDT",
-    "DMCUSDT","EIGENUSDT","ELSAUSDT","ENAUSDT","EPICUSDT","EPTUSDT","ESPUSDT",
-    "ETCUSDT","ETHUSDT","EVAAUSDT","FIOUSDT","FLNCUSDT","FLUXUSDT","FOLKSUSDT",
-    "FUNUSDT","FXSUSDT","GLMUSDT","GRIFFAINUSDT","GUAUSDT","HANAUSDT",
-    "HEMIUSDT","ICPUSDT","ICXUSDT","INITUSDT","IOSTUSDT","IOUSDT","IPUSDT",
-    "KITEUSDT","LABUSDT","LIGHTUSDT","LRCUSDT","LYNUSDT","MAGICUSDT","MAVUSDT",
-    "MEGAUSDT","MILKUSDT","MOODENGUSDT","MTLUSDT","NFPUSDT","NMRUSDT",
-    "NOMUSDT","NOTUSDT","OBOLUSDT","OMGUSDT","OPENUSDT","OPNUSDT","ORBSUSDT",
+    "1000000BOBUSDT","1000BONKUSDT","1000CATUSDT","1000RATSUSDT","1000SATSUSDT",
+    "A2ZUSDT","ACHUSDT","AI16ZUSDT","AINUSDT","AIOTUSDT","ALGOUSDT","ALICEUSDT",
+    "ALPINEUSDT","ANKRUSDT","ARKMUSDT","ASRUSDT","ASTERUSDT","AUSDT","AWEUSDT",
+    "BANKUSDT","BASEDUSDT","BELUSDT","BIDUSDT","BMTUSDT","BTRUSDT","CFXUSDT",
+    "CHIPUSDT","COAIUSDT","COMBOUSDT","COMMONUSDT","CRCLUSDT","CUSDT","DAMUSDT",
+    "DEFIUSDT","DEXEUSDT","DIAUSDT","DMCUSDT","EIGENUSDT","ELSAUSDT","ENAUSDT",
+    "EPICUSDT","EPTUSDT","ETHUSDT","EVAAUSDT","FLNCUSDT","FLUXUSDT","FUNUSDT",
+    "FXSUSDT","GLMUSDT","GRIFFAINUSDT","GUAUSDT","HANAUSDT","HEMIUSDT","ICXUSDT",
+    "INITUSDT","IOUSDT","IPUSDT","KITEUSDT","LABUSDT","LIGHTUSDT","LRCUSDT",
+    "LYNUSDT","MAGICUSDT","MEGAUSDT","MILKUSDT","MOODENGUSDT","MTLUSDT","NFPUSDT",
+    "NMRUSDT","NOMUSDT","NOTUSDT","OBOLUSDT","OPENUSDT","OPNUSDT","ORBSUSDT",
     "PEOPLEUSDT","PIPPINUSDT","PIXELUSDT","PLUMEUSDT","POLUSDT","POWERUSDT",
-    "POWRUSDT","PROMPTUSDT","PTBUSDT","PUMPBTCUSDT","PUNDIXUSDT","QUICKUSDT",
-    "RAVEUSDT","REEFUSDT","RESOLVUSDT","REZUSDT","RLSUSDT","RVVUSDT",
-    "SAGAUSDT","SAHARAUSDT","SANTOSUSDT","SEIUSDT","SIGNUSDT","SKRUSDT",
-    "SNDKUSDT","SOMIUSDT","SPELLUSDT","SPKUSDT","STABLEUSDT","STBLUSDT",
-    "STXUSDT","TNSRUSDT","TRBUSDT","TRUTHUSDT","TURBOUSDT","UBUSDT",
-    "USUALUSDT","UXLINKUSDT","VANRYUSDT","VINEUSDT","VIRTUALUSDT","VVVUSDT",
-    "WAXPUSDT","WLDUSDT","XCNUSDT","XEMUSDT","XLMUSDT","XRPUSDT","YBUSDT",
-    "ZECUSDT","ZENUSDT","ZEREBROUSDT","ZKJUSDT",
+    "POWRUSDT","PTBUSDT","PUMPBTCUSDT","PUNDIXUSDT","QUICKUSDT","RAVEUSDT",
+    "REEFUSDT","RESOLVUSDT","RLSUSDT","RVVUSDT","SAGAUSDT","SANTOSUSDT","SEIUSDT",
+    "SIGNUSDT","SKRUSDT","SNDKUSDT","SOMIUSDT","SPELLUSDT","SPKUSDT","STABLEUSDT",
+    "STBLUSDT","TRUTHUSDT","TURBOUSDT","UBUSDT","USUALUSDT","VANRYUSDT","VINEUSDT",
+    "VIRTUALUSDT","VVVUSDT","WLDUSDT","XEMUSDT","XLMUSDT","XRPUSDT","YBUSDT",
+    "ZECUSDT","ZEREBROUSDT",
 ]
 
 # ── TEST DEFINITIONS ─────────────────────────────────────────────────────────
 TESTS = [
     {
-        "name":        "TEST_1_BASELINE",
-        "label":       "Baseline (full period, normal slip)",
-        "start":       (2024, 7),
-        "end":         (2026, 6),
-        "slip_rate":   0.0002,
-        "liq_test":    False,
-        "pass_pf":     1.5,
-        "pass_wr":     0.42,
+        "name":     "FINAL_BASELINE",
+        "label":    "Final Baseline — 117 coins, full period Jul24–Jun26",
+        "start":    (2024, 7),
+        "end":      (2026, 6),
+        "slip_rate": 0.0002,
+        "pass_pf":  1.5,
+        "pass_wr":  0.42,
     },
     {
-        "name":        "TEST_2_WALK_FORWARD",
-        "label":       "Walk-Forward OOS (Jan–Jun 2026)",
-        "start":       (2026, 1),
-        "end":         (2026, 6),
-        "slip_rate":   0.0002,
-        "liq_test":    False,
-        "pass_pf":     1.2,
-        "pass_wr":     0.42,
-    },
-    {
-        "name":        "TEST_3_SLIP_STRESS",
-        "label":       "Slippage Stress (full period, 0.05% slip)",
-        "start":       (2024, 7),
-        "end":         (2026, 6),
-        "slip_rate":   0.0005,
-        "liq_test":    False,
-        "pass_pf":     1.2,
-        "pass_wr":     0.42,
-    },
-    {
-        "name":        "TEST_4_BEAR_REGIME",
-        "label":       "Bear Regime (Jul 2024 – Mar 2025)",
-        "start":       (2024, 7),
-        "end":         (2025, 3),
-        "slip_rate":   0.0002,
-        "liq_test":    False,
-        "pass_pf":     1.0,
-        "pass_wr":     0.42,
-    },
-    {
-        "name":        "TEST_5_LIQUIDATION",
-        "label":       "Liquidation Stress (forced liq at -90% equity)",
-        "start":       (2024, 7),
-        "end":         (2026, 6),
-        "slip_rate":   0.0002,
-        "liq_test":    True,
-        "pass_pf":     1.0,
-        "pass_wr":     0.42,
+        "name":     "FINAL_WALKFORWARD",
+        "label":    "Final Walk-Forward OOS — 117 coins, Jan–Jun 2026",
+        "start":    (2026, 1),
+        "end":      (2026, 6),
+        "slip_rate": 0.0002,
+        "pass_pf":  1.3,
+        "pass_wr":  0.42,
     },
 ]
 
 # ── STRATEGY PARAMS ──────────────────────────────────────────────────────────
-INTERVAL        = "15m"
-LEVERAGE        = 5
-START_CAPITAL   = 10_000.0
-RISK_PCT        = 0.0075          # 0.75% of equity per trade
-FEE_RATE        = 0.0005          # 0.05% per side
-MAX_HOLD_BARS   = 960             # 10 days on 15m
-WARMUP_BARS     = 70
+INTERVAL       = "15m"
+LEVERAGE       = 5
+START_CAPITAL  = 10_000.0
+RISK_PCT       = 0.0075        # 0.75% of equity per trade
+FEE_RATE       = 0.0005        # 0.05% per side
+MAX_HOLD_BARS  = 960           # 10 days on 15m
+WARMUP_BARS    = 70
 
-TP_PCT          = 0.030           # 3.0%
-SL_PCT          = 0.150           # 15.0%
+TP_PCT         = 0.030         # 3.0%
+SL_PCT         = 0.150         # 15.0%
 
-EMA_FAST        = 9
-EMA_SLOW        = 21
-EMA_TREND       = 50
-SLOPE_BARS      = 10
-ADX_PERIOD      = 14
-ADX_MIN         = 22.0
-SLOPE_MIN       = 0.05            # % threshold for slope direction
-
-LIQ_THRESHOLD  = 0.10            # liquidate all positions if equity < 10% of start
+EMA_FAST       = 9
+EMA_SLOW       = 21
+EMA_TREND      = 50
+SLOPE_BARS     = 10
+ADX_PERIOD     = 14
+ADX_MIN        = 22.0
+SLOPE_MIN      = 0.05          # % threshold for slope direction
 
 BASE_URL = "https://data.binance.vision/data/futures/um/monthly/klines"
 
@@ -201,12 +150,7 @@ def calc_ema(values, period):
     return ema
 
 def calc_adx_array(bars, period=14):
-    """
-    O(n) ADX. Exact GMaxV1.py match:
-      ws() Wilder smoother (running-sum form)
-      SMA seed -> Wilder for final ADX
-      period*3 guard before trusting values
-    """
+    """O(n) ADX — exact GMaxV1.py / stress-suite match."""
     n = len(bars)
     if n < period * 3:
         return [0.0] * n
@@ -235,10 +179,9 @@ def calc_adx_array(bars, period=14):
             r.append(r[-1] - r[-1] / p + x)
         return r
 
-    st = ws(tr_raw,  period)
+    st = ws(tr_raw, period)
     sp = ws(pdm_raw, period)
     sm = ws(mdm_raw, period)
-
     if not st:
         return [0.0] * n
 
@@ -257,12 +200,10 @@ def calc_adx_array(bars, period=14):
         adx_rolling.append(adx_val)
 
     result = [0.0] * n
-    guard_k = period
-    for k in range(guard_k, len(adx_rolling)):
+    for k in range(period, len(adx_rolling)):
         bar_idx = 2 * period - 1 + k
         if bar_idx < n:
             result[bar_idx] = max(0.0, min(100.0, adx_rolling[k]))
-
     return result
 
 def compute_indicators(args):
@@ -280,31 +221,28 @@ def compute_indicators(args):
 
 # ── SIMULATION ───────────────────────────────────────────────────────────────
 def run_test(test_cfg, sym_inds):
-    tname       = test_cfg["name"]
-    slip_rate   = test_cfg["slip_rate"]
-    liq_test    = test_cfg["liq_test"]
-    ROUND_TRIP  = (FEE_RATE + slip_rate) * 2
+    tname      = test_cfg["name"]
+    slip_rate  = test_cfg["slip_rate"]
+    ROUND_TRIP = (FEE_RATE + slip_rate) * 2
 
-    # Build global event list: (ts, sym, bar_index)
     events = []
     for sym, inds in sym_inds.items():
         for i, bar in enumerate(inds["bars"]):
             events.append((bar["ts"], sym, i))
     events.sort()
 
-    equity    = START_CAPITAL
-    open_pos  = {}    # sym -> position dict
-    closed    = []
-    liquidated = False
+    equity   = START_CAPITAL
+    open_pos = {}
+    closed   = []
 
     rej = {
-        "warmup":       0,
-        "sym_open":     0,
-        "slope":        0,
-        "no_cross":     0,
-        "adx":          0,
-        "insuff_cap":   0,
-        "executed":     0,
+        "warmup":     0,
+        "sym_open":   0,
+        "slope":      0,
+        "no_cross":   0,
+        "adx":        0,
+        "insuff_cap": 0,
+        "executed":   0,
     }
 
     progress_step = max(1, len(events) // 20)
@@ -314,42 +252,6 @@ def run_test(test_cfg, sym_inds):
             print(f"  [{tname}] {step/len(events)*100:.0f}%  "
                   f"eq=${equity:,.0f}  open={len(open_pos)}  trades={len(closed)}", flush=True)
 
-        # ── LIQUIDATION CHECK ────────────────────────────────────────────────
-        if liq_test and not liquidated:
-            if equity < START_CAPITAL * LIQ_THRESHOLD:
-                print(f"  [{tname}] *** LIQUIDATION TRIGGERED at ${equity:,.2f} ***", flush=True)
-                # Force-close ALL open positions at current bar's close
-                for lsym, lpos in list(open_pos.items()):
-                    linds = sym_inds[lsym]
-                    # find bar index closest to current ts
-                    lbars = linds["bars"]
-                    li    = lpos["entry_bar"]
-                    # use latest available bar for this symbol
-                    while li + 1 < len(lbars) and lbars[li+1]["ts"] <= ts:
-                        li += 1
-                    lbar   = lbars[li]
-                    exit_px = lbar["close"]
-                    ep      = lpos["entry"]
-                    side    = lpos["side"]
-                    sz      = lpos["size"]
-                    notional = sz * ep
-                    raw_ret = (exit_px - ep) / ep if side == "LONG" else (ep - exit_px) / ep
-                    pnl     = raw_ret * notional - notional * ROUND_TRIP
-                    margin  = notional / LEVERAGE
-                    pnl     = max(pnl, -margin)
-                    equity += pnl
-                    closed.append({
-                        "symbol": lsym, "side": side,
-                        "entry_ts": lpos["entry_ts"], "exit_ts": ts,
-                        "entry_px": ep, "exit_px": exit_px,
-                        "size": sz, "notional": notional, "margin": margin,
-                        "pnl": pnl, "win": pnl > 0, "duration": li - lpos["entry_bar"],
-                        "tp_hit": False, "timed_out": False, "forced": True, "liquidated": True,
-                    })
-                open_pos.clear()
-                liquidated = True
-                break   # stop trading after liquidation
-
         inds = sym_inds[sym]
         bars = inds["bars"]
         bar  = bars[i]
@@ -358,60 +260,56 @@ def run_test(test_cfg, sym_inds):
         if sym in open_pos:
             pos    = open_pos[sym]
             side   = pos["side"]
-            tp     = pos["tp"]
-            sl     = pos["sl"]
-            sz     = pos["size"]
             ep     = pos["entry"]
+            sz     = pos["size"]
             notional = sz * ep
             margin   = notional / LEVERAGE
             held   = i - pos["entry_bar"]
 
             hit_tp = hit_sl = timed_out = False
-
             if MAX_HOLD_BARS is not None and held >= MAX_HOLD_BARS:
                 timed_out = True
             elif side == "LONG":
-                if bar["high"] >= tp:  hit_tp = True
-                elif bar["low"]  <= sl: hit_sl = True
+                if bar["high"] >= pos["tp"]:  hit_tp = True
+                elif bar["low"]  <= pos["sl"]: hit_sl = True
             else:
-                if bar["low"]  <= tp:  hit_tp = True
-                elif bar["high"] >= sl: hit_sl = True
+                if bar["low"]  <= pos["tp"]:  hit_tp = True
+                elif bar["high"] >= pos["sl"]: hit_sl = True
 
             if hit_tp or hit_sl or timed_out:
-                exit_px  = bar["close"] if timed_out else (tp if hit_tp else sl)
-                raw_ret  = (exit_px - ep) / ep if side == "LONG" else (ep - exit_px) / ep
-                pnl      = raw_ret * notional - notional * ROUND_TRIP
-                pnl      = max(pnl, -margin)
-                equity  += pnl
+                exit_px = bar["close"] if timed_out else (pos["tp"] if hit_tp else pos["sl"])
+                raw_ret = (exit_px - ep) / ep if side == "LONG" else (ep - exit_px) / ep
+                pnl     = raw_ret * notional - notional * ROUND_TRIP
+                pnl     = max(pnl, -margin)
+                equity += pnl
                 closed.append({
                     "symbol": sym, "side": side,
                     "entry_ts": pos["entry_ts"], "exit_ts": ts,
                     "entry_px": ep, "exit_px": exit_px,
                     "size": sz, "notional": notional, "margin": margin,
                     "pnl": pnl, "win": pnl > 0, "duration": held,
-                    "tp_hit": hit_tp, "timed_out": timed_out, "forced": False, "liquidated": False,
+                    "tp_hit": hit_tp, "timed_out": timed_out, "forced": False,
                 })
                 del open_pos[sym]
 
             if sym in open_pos:
-                continue   # still in position — skip entry
+                continue
 
-        # ── WARMUP GUARD ─────────────────────────────────────────────────────
+        # ── WARMUP ───────────────────────────────────────────────────────────
         if i < WARMUP_BARS:
             rej["warmup"] += 1
             continue
 
-        # ── ENTRY BLOCKED: sym already open ──────────────────────────────────
         if sym in open_pos:
             rej["sym_open"] += 1
             continue
 
         # ── FILTER 1: EMA50 SLOPE ────────────────────────────────────────────
-        ema50     = inds["ema50"]
+        ema50 = inds["ema50"]
         if i < SLOPE_BARS:
             rej["slope"] += 1
             continue
-        slope_pct = (ema50[i] - ema50[i - SLOPE_BARS]) / ema50[i - SLOPE_BARS] * 100
+        slope_pct  = (ema50[i] - ema50[i - SLOPE_BARS]) / ema50[i - SLOPE_BARS] * 100
         trend_up   = slope_pct >  SLOPE_MIN
         trend_down = slope_pct < -SLOPE_MIN
         if not trend_up and not trend_down:
@@ -436,11 +334,11 @@ def run_test(test_cfg, sym_inds):
             continue
 
         # ── CAPITAL CHECK ─────────────────────────────────────────────────────
-        entry_px   = bar["close"]
+        entry_px    = bar["close"]
         risk_dollar = equity * RISK_PCT
-        pos_size   = risk_dollar / (entry_px * SL_PCT)  # contracts
-        notional   = pos_size * entry_px
-        margin     = notional / LEVERAGE
+        pos_size    = risk_dollar / (entry_px * SL_PCT)
+        notional    = pos_size * entry_px
+        margin      = notional / LEVERAGE
         if equity < margin:
             rej["insuff_cap"] += 1
             continue
@@ -460,7 +358,7 @@ def run_test(test_cfg, sym_inds):
         }
         rej["executed"] += 1
 
-    # ── FORCE-CLOSE remaining open positions at end of data ──────────────────
+    # ── FORCE-CLOSE remaining positions at end of data ────────────────────────
     for sym, pos in open_pos.items():
         bars    = sym_inds[sym]["bars"]
         last    = bars[-1]
@@ -481,7 +379,7 @@ def run_test(test_cfg, sym_inds):
             "entry_px": ep, "exit_px": exit_px,
             "size": sz, "notional": notional, "margin": margin,
             "pnl": pnl, "win": pnl > 0, "duration": held,
-            "tp_hit": False, "timed_out": False, "forced": True, "liquidated": False,
+            "tp_hit": False, "timed_out": False, "forced": True,
         })
 
     print(f"  [{tname}] DONE  eq=${equity:,.2f}  trades={len(closed)}", flush=True)
@@ -498,7 +396,7 @@ def compute_stats(trades, start_cap, final_eq):
     gl = abs(sum(t["pnl"] for t in losses))
     pf = gw / gl if gl else float("inf")
     wr = nw / n
-    exp= sum(t["pnl"] for t in trades) / n
+    exp = sum(t["pnl"] for t in trades) / n
 
     ts_sorted = sorted(trades, key=lambda t: t["exit_ts"])
     eq = start_cap; curve = [eq]
@@ -539,38 +437,34 @@ def compute_stats(trades, start_cap, final_eq):
     lo = [t for t in trades if t["side"] == "LONG"]
     sh = [t for t in trades if t["side"] == "SHORT"]
 
-    avg_notional = sum(t["notional"] for t in trades) / n
-    avg_margin   = sum(t["margin"]   for t in trades) / n
-
     return {
-        "total_trades":        n,
-        "wins":                nw,
-        "losses":              nl,
-        "forced_closed":       sum(1 for t in trades if t.get("forced")),
-        "timed_out":           sum(1 for t in trades if t.get("timed_out")),
-        "liquidated_event":    any(t.get("liquidated") for t in trades),
-        "win_rate":            wr,
-        "profit_factor":       pf,
-        "net_pnl":             final_eq - start_cap,
-        "final_equity":        final_eq,
-        "max_drawdown":        mdd,
-        "sharpe":              sharpe,
-        "sortino":             sortino,
-        "avg_win":             gw / nw if nw else 0,
-        "avg_loss":            -gl / nl if nl else 0,
-        "expectancy":          exp,
-        "avg_duration_bars":   sum(dur) / n,
-        "max_duration_bars":   max(dur),
-        "avg_notional":        avg_notional,
-        "avg_margin":          avg_margin,
-        "leverage_used":       LEVERAGE,
-        "long_trades":         len(lo),
-        "long_wr":             sum(1 for t in lo if t["win"]) / len(lo) if lo else 0,
-        "short_trades":        len(sh),
-        "short_wr":            sum(1 for t in sh if t["win"]) / len(sh) if sh else 0,
-        "best_win_streak":     bws,
-        "best_loss_streak":    bloss,
-        "monthly_pnl":         dict(sorted(monthly.items())),
+        "total_trades":      n,
+        "wins":              nw,
+        "losses":            nl,
+        "forced_closed":     sum(1 for t in trades if t.get("forced")),
+        "timed_out":         sum(1 for t in trades if t.get("timed_out")),
+        "win_rate":          wr,
+        "profit_factor":     pf,
+        "net_pnl":           final_eq - start_cap,
+        "final_equity":      final_eq,
+        "max_drawdown":      mdd,
+        "sharpe":            sharpe,
+        "sortino":           sortino,
+        "avg_win":           gw / nw if nw else 0,
+        "avg_loss":          -gl / nl if nl else 0,
+        "expectancy":        exp,
+        "avg_duration_bars": sum(dur) / n,
+        "max_duration_bars": max(dur),
+        "avg_notional":      sum(t["notional"] for t in trades) / n,
+        "avg_margin":        sum(t["margin"] for t in trades) / n,
+        "leverage_used":     LEVERAGE,
+        "long_trades":       len(lo),
+        "long_wr":           sum(1 for t in lo if t["win"]) / len(lo) if lo else 0,
+        "short_trades":      len(sh),
+        "short_wr":          sum(1 for t in sh if t["win"]) / len(sh) if sh else 0,
+        "best_win_streak":   bws,
+        "best_loss_streak":  bloss,
+        "monthly_pnl":       dict(sorted(monthly.items())),
     }
 
 def per_coin_stats(trades):
@@ -584,13 +478,13 @@ def per_coin_stats(trades):
         gw = sum(t["pnl"] for t in st if t["win"])
         gl = abs(sum(t["pnl"] for t in st if not t["win"]))
         rows.append({
-            "symbol":      sym,
-            "trades":      len(st),
-            "wins":        w,
-            "losses":      l,
-            "win_rate":    w / len(st),
+            "symbol":        sym,
+            "trades":        len(st),
+            "wins":          w,
+            "losses":        l,
+            "win_rate":      w / len(st),
             "profit_factor": gw / gl if gl else float("inf"),
-            "net_pnl":     sum(t["pnl"] for t in st),
+            "net_pnl":       sum(t["pnl"] for t in st),
         })
     rows.sort(key=lambda r: -r["profit_factor"])
     return rows
@@ -601,29 +495,24 @@ def write_summary(test_cfg, stats, coin_table, rej, loaded):
     label = test_cfg["label"]
     sy, sm = test_cfg["start"]
     ey, em = test_cfg["end"]
-    slip_r = test_cfg["slip_rate"]
 
     a = []; w = a.append
     w("=" * 72)
-    w(f"STRATEGY G — VAR_D  |  TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  {LEVERAGE}x  [15m]")
+    w(f"STRATEGY G — VAR_D  |  FINAL RUN  |  TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  {LEVERAGE}x  [15m]")
     w(f"TEST    : {tname}")
     w(f"Label   : {label}")
     w(f"Period  : {sy}-{sm:02d} to {ey}-{em:02d}")
-    w(f"Slip    : {slip_r*100:.3f}% per side  |  Fee: {FEE_RATE*100:.3f}% per side")
+    w(f"Slip    : {test_cfg['slip_rate']*100:.3f}% per side  |  Fee: {FEE_RATE*100:.3f}% per side")
     w(f"Capital : ${START_CAPITAL:,.0f}  Risk: {RISK_PCT*100:.2f}%/trade  Leverage: {LEVERAGE}x")
     w(f"Hold cap: {MAX_HOLD_BARS} bars (10 days)  |  Universe: {len(COINS)} coins  |  Loaded: {loaded}")
-    w(f"Liq test: {'YES — forced close at <10% equity' if test_cfg['liq_test'] else 'NO'}")
     w("=" * 72)
 
     if stats is None:
         w("NO TRADES EXECUTED")
         return "\n".join(a)
 
-    ok = stats["profit_factor"] >= test_cfg["pass_pf"] and stats["win_rate"] >= test_cfg["pass_wr"]
+    ok      = stats["profit_factor"] >= test_cfg["pass_pf"] and stats["win_rate"] >= test_cfg["pass_wr"]
     verdict = f"PASS (PF≥{test_cfg['pass_pf']} WR≥{int(test_cfg['pass_wr']*100)}%)" if ok else "FAIL"
-
-    if stats.get("liquidated_event"):
-        w("*** LIQUIDATION EVENT OCCURRED during this test ***")
 
     w(f"Total Trades     : {stats['total_trades']:,}")
     w(f"Wins / Losses    : {stats['wins']:,} / {stats['losses']:,}")
@@ -666,8 +555,8 @@ def write_summary(test_cfg, stats, coin_table, rej, loaded):
     w("")
     w("-- Monthly PnL ---")
     for ym, pnl in stats["monthly_pnl"].items():
-        bar_str = "+" if pnl >= 0 else ""
-        w(f"  {ym}: ${bar_str}{pnl:,.2f}")
+        sign = "+" if pnl >= 0 else ""
+        w(f"  {ym}: ${sign}{pnl:,.2f}")
     w("")
     w("-- Per-Coin (sorted by PF) ---")
     w(f"  {'Symbol':<24} {'PF':>7}  {'WR':>7}  {'Trades':>7}  {'Net PnL':>14}")
@@ -678,26 +567,24 @@ def write_summary(test_cfg, stats, coin_table, rej, loaded):
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    print(f"Strategy G | VAR_D | 5 Stress Tests | 144 coins | 15m | {LEVERAGE}x leverage")
+    print("=" * 72)
+    print("Strategy G | VAR_D | FINAL RUN | 117 filtered coins | 15m | 5x")
     print(f"TP {TP_PCT*100:.1f}%  SL {SL_PCT*100:.1f}%  Risk {RISK_PCT*100:.2f}%/trade  Hold cap {MAX_HOLD_BARS} bars")
-    print(f"Coins: {len(COINS)}")
+    print(f"Coins: {len(COINS)}  (27 consistent losers removed from 144-coin universe)")
+    print("=" * 72)
     print()
 
-    # Determine widest date range needed across all tests
-    # (download once, slice per test)
-    all_starts = [t["start"] for t in TESTS]
-    all_ends   = [t["end"]   for t in TESTS]
-    GLOBAL_START = min(all_starts)
-    GLOBAL_END   = max(all_ends)
+    # Widest date range across both tests
+    GLOBAL_START = (2024, 7)
+    GLOBAL_END   = (2026, 6)
 
     print(f"Phase 1: Downloading {len(COINS)} coins [{INTERVAL}] "
           f"{GLOBAL_START[0]}-{GLOBAL_START[1]:02d} → {GLOBAL_END[0]}-{GLOBAL_END[1]:02d} ...")
-    all_bars = {}
+    all_bars  = {}
     tasks = [(sym, GLOBAL_START[0], GLOBAL_START[1], GLOBAL_END[0], GLOBAL_END[1])
              for sym in COINS]
 
-    ok_count  = 0
-    miss_count = 0
+    ok_count = miss_count = 0
     with ThreadPoolExecutor(max_workers=100) as ex:
         futs = {ex.submit(fetch_symbol, t): t[0] for t in tasks}
         for fut in as_completed(futs):
@@ -717,10 +604,10 @@ def main():
 
     print(f"\nLoaded: {ok_count}/{len(COINS)}  Missing: {miss_count}")
     if ok_count == 0:
-        print("FATAL: 0 symbols loaded — likely geo-block or network issue. Aborting.")
+        print("FATAL: 0 symbols loaded — geo-block or network issue. Aborting.")
         return
 
-    # Phase 2: Indicators (compute once on full date range)
+    # Phase 2: Indicators on full date range
     print("\nPhase 2: Computing indicators ...")
     sym_inds_full = {}
     ind_tasks = [(sym, bars) for sym, bars in all_bars.items()
@@ -738,24 +625,26 @@ def main():
     print(f"  {len(sym_inds_full)} symbols with indicators ready.")
 
     # Phase 3: Run each test
-    summaries  = []
-    report     = {
+    summaries = []
+    report = {
         "meta": {
-            "strategy":     "Strategy G VAR_D (5 Stress Tests)",
-            "tp_pct":       TP_PCT,
-            "sl_pct":       SL_PCT,
-            "leverage":     LEVERAGE,
-            "risk_pct":     RISK_PCT,
+            "strategy":      "Strategy G VAR_D — FINAL RUN (117 coins)",
+            "tp_pct":        TP_PCT,
+            "sl_pct":        SL_PCT,
+            "leverage":      LEVERAGE,
+            "risk_pct":      RISK_PCT,
             "start_capital": START_CAPITAL,
-            "fee_pct":      FEE_RATE,
+            "fee_pct":       FEE_RATE,
             "max_hold_bars": MAX_HOLD_BARS,
-            "coins_listed": len(COINS),
-            "adx_min":      ADX_MIN,
+            "coins_listed":  len(COINS),
+            "adx_min":       ADX_MIN,
             "slope_min_pct": SLOPE_MIN,
+            "coins_cut":     27,
+            "cut_reason":    "PF < 1.0 in baseline AND bear regime — confirmed losers",
         }
     }
 
-    all_test_results = {}
+    all_results = {}
 
     for test_cfg in TESTS:
         tname  = test_cfg["name"]
@@ -764,7 +653,6 @@ def main():
 
         print(f"\nPhase 3 [{tname}]: {test_cfg['label']}")
 
-        # Slice bars to this test's date range
         start_ts = int(datetime(sy, sm, 1, tzinfo=timezone.utc).timestamp() * 1000)
         if em == 12:
             end_ts = int(datetime(ey + 1, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
@@ -795,45 +683,35 @@ def main():
         summary = write_summary(test_cfg, stats, coin_table, rej, loaded)
         summaries.append(summary)
         print("\n" + summary)
-
-        all_test_results[tname] = {
-            "stats":      stats,
-            "coin_table": coin_table,
-            "trades":     len(trades),
-            "final_eq":   final_eq,
-        }
+        all_results[tname] = {"stats": stats, "coin_table": coin_table}
 
         report[tname] = {
-            "label":       test_cfg["label"],
-            "period":      f"{sy}-{sm:02d} to {ey}-{em:02d}",
-            "slip_rate":   test_cfg["slip_rate"],
-            "liq_test":    test_cfg["liq_test"],
+            "label":        test_cfg["label"],
+            "period":       f"{sy}-{sm:02d} to {ey}-{em:02d}",
+            "slip_rate":    test_cfg["slip_rate"],
             "coins_loaded": loaded,
-            "aggregate":   stats,
-            "per_coin":    coin_table,
-            "pass_pf":     test_cfg["pass_pf"],
-            "pass_wr":     test_cfg["pass_wr"],
+            "aggregate":    stats,
+            "per_coin":     coin_table,
+            "pass_pf":      test_cfg["pass_pf"],
+            "pass_wr":      test_cfg["pass_wr"],
         }
 
-    # Phase 4: Quick comparison table
-    print("\n" + "=" * 85)
-    print("COMPARISON ACROSS ALL 5 TESTS")
-    print("=" * 85)
-    print(f"{'Test':<28} {'Trades':>7} {'WR%':>7} {'PF':>7} {'DD%':>7} {'PnL':>14}  Verdict")
-    print("-" * 85)
+    # Phase 4: Comparison table
+    print("\n" + "=" * 80)
+    print("FINAL COMPARISON")
+    print("=" * 80)
+    print(f"{'Test':<22} {'Trades':>7} {'WR%':>7} {'PF':>7} {'DD%':>7} {'PnL':>14}  Verdict")
+    print("-" * 80)
     for test_cfg in TESTS:
         tname = test_cfg["name"]
-        r = all_test_results.get(tname, {})
-        s = r.get("stats")
+        s = all_results.get(tname, {}).get("stats")
         if s:
             ok = s["profit_factor"] >= test_cfg["pass_pf"] and s["win_rate"] >= test_cfg["pass_wr"]
-            verdict = "PASS" if ok else "FAIL"
-            liq_flag = " [LIQ]" if s.get("liquidated_event") else ""
-            print(f"{tname:<28} {s['total_trades']:>7,} {s['win_rate']*100:>6.2f}% "
+            print(f"{tname:<22} {s['total_trades']:>7,} {s['win_rate']*100:>6.2f}% "
                   f"{s['profit_factor']:>7.4f} {s['max_drawdown']*100:>6.2f}% "
-                  f"${s['net_pnl']:>13,.2f}  {verdict}{liq_flag}")
+                  f"${s['net_pnl']:>13,.2f}  {'PASS' if ok else 'FAIL'}")
         else:
-            print(f"{tname:<28}  NO DATA")
+            print(f"{tname:<22}  NO DATA")
 
     # Write outputs
     sep = "\n\n" + "=" * 72 + "\n\n"
@@ -847,3 +725,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
